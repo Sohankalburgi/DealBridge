@@ -88,13 +88,18 @@ A group mode, where the bot is added to a shared chat the users create, is a pos
 | Input | Who | What it does |
 | --- | --- | --- |
 | /start | Both | Onboarding. With a deal payload, joins that deal |
-| /newdeal | Seller | Asks for item, price, currency and expected delivery time, then returns a join link |
+| Natural-language listing request | Seller | AI detects an offer or listing request, drafts terms, and creates a shareable buyer link after seller approval |
+| /search `<query>` | Seller | Searches the seller's unjoined listings in Elasticsearch and generates a buyer link for the selected listing |
 | /status | Both | Shows state, terms, and next action |
-| /proof | Seller | Starts proof upload (or just send a photo while the deal is in the shipping state) |
+| /orders | Both | Lists recent deals for the user and lets them inspect or reopen one |
+| /retry | Both | Retries failed payment setup or resends the buyer's existing checkout link |
+| /proof | Seller | Submit fulfillment evidence after the payment hold is secured (send a photo or screenshot) |
 | /cancel | Both | Cancels the deal where the state allows it |
 | Inline buttons | Both | Confirm terms, Edit terms, Approve payment (URL button to PayPal), Confirm received, Report a problem |
 
 Join link format: `https://t.me/<bot_username>?start=deal_<short_id>`. The start payload allows only letters, digits, underscore and dash, up to 64 characters, so use a short random ID.
+
+The agent classifies messages from both participants and routes questions, terms changes, confirmations, payment retries, and marketplace searches to the corresponding workflow. A user can ask to find a product conversationally; if the request does not name a product, the agent asks a follow-up question and searches Elasticsearch using the answer. Search results show available unjoined listings and allow the buyer to inspect and join a deal. A seller starts a new listing by describing what they want to sell; the AI detects listing intent, drafts terms, and presents an approval step before creating the deal and share link. There is no `/newdeal` command. Relayed messages include the sender's role and Telegram name; sellers are notified with the buyer's name when they join. Participants can ask about prior deals in natural language or use `/orders`; `/retry` or a message asking to retry resumes an eligible payment step without creating a duplicate checkout order.
 
 ### 4.4 Security
 
@@ -108,7 +113,7 @@ Join link format: `https://t.me/<bot_username>?start=deal_<short_id>`. The start
 
 ### Step 1: Seller creates the deal
 
-- Telegram: the seller sends /newdeal and answers the bot's questions: item, price, currency, expected delivery time.
+- Telegram: the seller describes the goods or service they want to offer, including price, currency, and fulfillment or delivery timeline. The AI detects the listing intent and drafts terms for seller review.
 - Backend: create the deal (state CREATED), generate the short ID, return the join link.
 - Agent: if the seller describes the item in free text, the LLM turns it into structured fields.
 

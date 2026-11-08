@@ -128,6 +128,10 @@ class DealsDatabase:
                 "deal_id": {"type": "keyword"},
                 "seller_id": {"type": "long"},
                 "buyer_id": {"type": "long"},
+                "buyer_name": {"type": "keyword"},
+                "buyer_username": {"type": "keyword"},
+                "seller_name": {"type": "keyword"},
+                "seller_username": {"type": "keyword"},
                 "state": {"type": "keyword"},
                 "raw_description": {"type": "text"},
                 "product_details": {"type": "text"},
@@ -195,6 +199,112 @@ class DealsDatabase:
             seq_no=response["_seq_no"],
             primary_term=response["_primary_term"],
         )
+
+    def list_for_user(self, user_id: int, limit: int = 10) -> list[DealDocument]:
+        """Return the most recent deals in which this Telegram user participates."""
+        client = self._require_client()
+        response = client.search(
+            index=ELASTICSEARCH_INDEX,
+            query={
+                "bool": {
+                    "should": [
+                        {"term": {"seller_id": user_id}},
+                        {"term": {"buyer_id": user_id}},
+                    ],
+                    "minimum_should_match": 1,
+                }
+            },
+            sort=[{"created_at": {"order": "desc"}}],
+            size=limit,
+            seq_no_primary_term=True,
+        )
+        return [
+            DealDocument(
+                deal_id=hit["_id"],
+                source=hit["_source"],
+                client=client,
+                seq_no=hit["_seq_no"],
+                primary_term=hit["_primary_term"],
+            )
+            for hit in response["hits"]["hits"]
+        ]
+
+    def search_seller_products(
+        self, seller_id: int, query_text: str, limit: int = 8
+    ) -> list[DealDocument]:
+        """Find this seller's unjoined listings in the Elasticsearch deals index."""
+        client = self._require_client()
+        response = client.search(
+            index=ELASTICSEARCH_INDEX,
+            query={
+                "bool": {
+                    "must": [
+                        {
+                            "multi_match": {
+                                "query": query_text,
+                                "fields": ["terms^3", "product_details^3", "raw_description"],
+                                "type": "best_fields",
+                                "operator": "and",
+                            }
+                        }
+                    ],
+                    "filter": [
+                        {"term": {"seller_id": seller_id}},
+                        {"term": {"state": "CREATED"}},
+                    ],
+                }
+            },
+            sort=[{"created_at": {"order": "desc"}}],
+            size=limit,
+            seq_no_primary_term=True,
+        )
+        return [
+            DealDocument(
+                deal_id=hit["_id"],
+                source=hit["_source"],
+                client=client,
+                seq_no=hit["_seq_no"],
+                primary_term=hit["_primary_term"],
+            )
+            for hit in response["hits"]["hits"]
+        ]
+
+    def search_available_products(
+        self, query_text: str, limit: int = 8
+    ) -> list[DealDocument]:
+        """Search public, unjoined listings in the marketplace."""
+        client = self._require_client()
+        response = client.search(
+            index=ELASTICSEARCH_INDEX,
+            query={
+                "bool": {
+                    "must": [
+                        {
+                            "multi_match": {
+                                "query": query_text,
+                                "fields": ["terms^3", "product_details^3", "raw_description"],
+                                "type": "best_fields",
+                                "operator": "and",
+                            }
+                        }
+                    ],
+                    "filter": [{"term": {"state": "CREATED"}}],
+                }
+            },
+            sort=[{"created_at": {"order": "desc"}}],
+            size=limit,
+            seq_no_primary_term=True,
+        )
+        return [
+            DealDocument(
+                deal_id=hit["_id"],
+                source=hit["_source"],
+                client=client,
+                seq_no=hit["_seq_no"],
+                primary_term=hit["_primary_term"],
+            )
+            for hit in response["hits"]["hits"]
+        ]
 
     def __setitem__(self, deal_id: str, deal: dict[str, Any]) -> None:
         client = self._require_client()

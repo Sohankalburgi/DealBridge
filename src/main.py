@@ -8,7 +8,16 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, Cal
 
 from config import TELEGRAM_BOT_TOKEN, logger
 from database import deals_db
-from handlers import start, newdeal, handle_message, handle_photo, button_handler
+from handlers import (
+    button_handler,
+    handle_message,
+    handle_photo,
+    orders,
+    retry,
+    search_products,
+    start,
+    status,
+)
 from paypal import authorize_order
 
 @asynccontextmanager
@@ -34,7 +43,7 @@ async def mark_funds_held(deal_id: str, auth_id: str):
     await telegram_app.bot.send_message(
         chat_id=deal['buyer_id'],
         text=f"✅ **Payment Hold Secured!** (Auth ID: `{auth_id}`)\n"
-             f"Your funds are safely held in escrow. The seller has been instructed to ship the item and upload photo proof.",
+             f"Your funds are safely held in escrow. The seller has been instructed to fulfill the agreed terms and upload suitable evidence.",
         parse_mode='Markdown'
     )
 
@@ -42,11 +51,11 @@ async def mark_funds_held(deal_id: str, auth_id: str):
     await telegram_app.bot.send_message(
         chat_id=deal['seller_id'],
         text=f"✅ **Funds Secured in Escrow!** (Auth ID: `{auth_id}`)\n"
-             f"The buyer has authorized the payment hold. It is now safe to ship the item.\n\n"
-             f"📸 **Action Required — Submit Proof:**\n"
-             f"Write this one-time verification code on a piece of paper next to the item:\n\n"
+             f"The buyer has authorized the payment hold. It is now safe to fulfill the agreed terms.\n\n"
+             f"📸 **Action Required — Submit Fulfillment Evidence:**\n"
+             f"Include this one-time verification code in your evidence (place it beside physical goods, or include it in a screenshot for a non-physical transaction):\n\n"
              f"👉 **`{deal['proof_code']}`** 👈\n\n"
-             f"Send the photo right here in the chat along with the tracking number in the caption!",
+             f"Send a photo or screenshot right here in the chat, with tracking details in the caption when applicable.",
         parse_mode='Markdown'
     )
 
@@ -109,7 +118,10 @@ async def main():
     await asyncio.to_thread(deals_db.connect)
 
     telegram_app.add_handler(CommandHandler("start", start))
-    telegram_app.add_handler(CommandHandler("newdeal", newdeal))
+    telegram_app.add_handler(CommandHandler("search", search_products))
+    telegram_app.add_handler(CommandHandler("orders", orders))
+    telegram_app.add_handler(CommandHandler("status", status))
+    telegram_app.add_handler(CommandHandler("retry", retry))
     telegram_app.add_handler(CallbackQueryHandler(button_handler))
     telegram_app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
