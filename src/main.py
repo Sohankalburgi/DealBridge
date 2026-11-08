@@ -1,5 +1,4 @@
 import asyncio
-import uuid
 from contextlib import asynccontextmanager
 import uvicorn
 from fastapi import FastAPI, Request
@@ -10,6 +9,7 @@ from config import TELEGRAM_BOT_TOKEN, logger
 from database import deals_db
 from handlers import (
     button_handler,
+    complete_payment_hold_notifications,
     handle_message,
     handle_photo,
     orders,
@@ -31,32 +31,8 @@ telegram_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
 
 async def mark_funds_held(deal_id: str, auth_id: str):
     """Updates deal state to FUNDS_HELD and notifies buyer and seller on Telegram."""
-    deal = deals_db.get(deal_id)
-    if not deal or deal.get('state') == 'FUNDS_HELD':
-        return
-
-    deal['state'] = 'FUNDS_HELD'
-    deal['authorization_id'] = auth_id
-    deal['proof_code'] = str(uuid.uuid4())[:6].upper()
-
-    # Notify Buyer
-    await telegram_app.bot.send_message(
-        chat_id=deal['buyer_id'],
-        text=f"✅ **Payment Hold Secured!** (Auth ID: `{auth_id}`)\n"
-             f"Your funds are safely held in escrow. The seller has been instructed to fulfill the agreed terms and upload suitable evidence.",
-        parse_mode='Markdown'
-    )
-
-    # Notify Seller with One-Time Proof Code
-    await telegram_app.bot.send_message(
-        chat_id=deal['seller_id'],
-        text=f"✅ **Funds Secured in Escrow!** (Auth ID: `{auth_id}`)\n"
-             f"The buyer has authorized the payment hold. It is now safe to fulfill the agreed terms.\n\n"
-             f"📸 **Action Required — Submit Fulfillment Evidence:**\n"
-             f"Include this one-time verification code in your evidence (place it beside physical goods, or include it in a screenshot for a non-physical transaction):\n\n"
-             f"👉 **`{deal['proof_code']}`** 👈\n\n"
-             f"Send a photo or screenshot right here in the chat, with tracking details in the caption when applicable.",
-        parse_mode='Markdown'
+    await complete_payment_hold_notifications(
+        telegram_app, deal_id, auth_id
     )
 
 @app.get("/paypal/mock-checkout", response_class=HTMLResponse)

@@ -4,9 +4,9 @@ Complete build workflow for the PayPal AI Hackathon submission
 
 ## 1. What gets built
 
-A Telegram bot that sits between a buyer and a seller in an informal deal. The bot relays their chat, turns it into confirmed terms, holds the buyer's money with a PayPal authorization, checks the seller's delivery proof with AI, and then captures or voids the payment.
+A Telegram bot that sits between a buyer and a seller in an informal deal. The bot relays their chat, turns it into confirmed terms, holds the buyer's money with a PayPal authorization, checks the buyer's received-order photo with AI, and then captures or voids the payment.
 
-Workflow in one line: seller creates a deal, buyer joins by link, agent drafts terms, buyer approves a PayPal hold, seller ships with proof, agent verifies, and the payment is released or stays held.
+Workflow in one line: seller creates a deal, buyer joins by link, agent drafts terms, buyer approves a PayPal hold, seller sends a one-time code to the buyer, buyer uploads a photo after receiving the order, agent verifies, and the payment is released or stays held.
 
 How this meets the hackathon requirements:
 
@@ -93,7 +93,7 @@ A group mode, where the bot is added to a shared chat the users create, is a pos
 | /status | Both | Shows state, terms, and next action |
 | /orders | Both | Lists recent deals for the user and lets them inspect or reopen one |
 | /retry | Both | Retries failed payment setup or resends the buyer's existing checkout link |
-| /proof | Seller | Submit fulfillment evidence after the payment hold is secured (send a photo or screenshot) |
+| Photo upload | Buyer | Submit a photo of the received order with the seller's one-time code visible after the payment hold is secured |
 | /cancel | Both | Cancels the deal where the state allows it |
 | Inline buttons | Both | Confirm terms, Edit terms, Approve payment (URL button to PayPal), Confirm received, Report a problem |
 
@@ -126,7 +126,7 @@ The agent classifies messages from both participants and routes questions, terms
 
 - Telegram: buyer and seller talk through the bot. The agent posts a terms card that both must confirm with a button.
 - Agent: extracts terms from the chat (item, attributes, price, currency, delivery deadline). Runs the Channel3 market price check and the scam-signal check. If risk is high, the buyer sees a warning before any money is held.
-- Backend: when both confirm, freeze the terms (state TERMS\_CONFIRMED) and generate a one-time proof code, a short random string the seller will have to show in the delivery photo.
+- Backend: when both confirm, freeze the terms (state TERMS\_CONFIRMED). After the payment hold is secured, generate a one-time proof code for the seller to send to the buyer in the deal chat.
 
 ### Step 4: Buyer approves the hold
 
@@ -137,16 +137,16 @@ The agent classifies messages from both participants and routes questions, terms
 ### Step 5: Funds secured
 
 - Backend: on return from PayPal, authorize the order. Store the authorization ID and set state FUNDS\_HELD. A PayPal webhook confirms the same event.
-- Telegram: tell the seller that funds are secured and it is safe to ship, and remind them of the proof code and deadline. Tell the buyer the hold is in place and nothing has been charged.
+- Telegram: tell the seller that funds are secured and it is safe to fulfill the order, and provide the code to send to the buyer. Tell the buyer the hold is in place and to submit a photo with the seller's code visible after receiving the order.
 
-### Step 6: Seller ships and submits proof
+### Step 6: Buyer receives the order and submits proof
 
-- Telegram: the seller sends a photo of the item with the one-time code written on paper beside it, plus a tracking number.
-- Backend: store the photo, record the tracking number, and attach tracking to the PayPal order (check the current docs for the exact endpoint). State becomes PROOF\_SUBMITTED.
+- Telegram: after receiving the order, the buyer sends a photo of the received item with the one-time code from the seller visible, plus a tracking number when available.
+- Backend: inspect the photo and caption. State becomes PROOF\_SUBMITTED.
 
 ### Step 7: AI verification
 
-- Agent: checks the code is visible and correct, checks the item matches the confirmed terms, and checks tracking status. See section 9 for the checks and the combiner.
+- Agent: checks the code is visible and correct, checks the item matches the confirmed terms, and reports any visible tracking number. See section 9 for the checks and the combiner.
 - Backend: stores a verdict with reasons.
 
 ### Step 8: Outcome
@@ -154,12 +154,12 @@ The agent classifies messages from both participants and routes questions, terms
 | Verdict | What happens |
 | --- | --- |
 | RELEASE | Capture the authorization. The seller is paid. Both users are notified. State COMPLETED |
-| ASK\_BUYER | The buyer sees the evidence and the agent's reasons, and chooses Confirm received or Report a problem |
-| HOLD | The code is missing or wrong, or tracking looks bad. The seller is asked to resubmit. The money stays held |
+| ASK\_BUYER | The buyer sees the submitted photo and the agent's reasons, and chooses Approve & Release or Report a problem |
+| HOLD | The code is missing or wrong. The buyer is asked to resubmit a clear received-order photo. The money stays held |
 
 ### Step 9: Buyer confirmation window
 
-After delivery, the buyer has a fixed window to confirm or report a problem. Confirm leads to capture. Report a problem keeps the hold and moves the deal to DISPUTED for manual review in the dashboard. If the window passes in silence on a clean verdict, the worker captures automatically.
+If the agent cannot confidently verify the received-order photo, the buyer can confirm receipt or report a problem. Confirm leads to capture. Report a problem keeps the hold and moves the deal to DISPUTED for manual review in the dashboard.
 
 ### Step 10: Timeouts and cancellations
 
@@ -275,13 +275,13 @@ Inputs: confirmed terms, the one-time code, the proof photo and the tracking num
 
 1. Code check: the vision model reads the code in the photo, and the code compares it to the stored value in plain code.
 2. Item check: does the photo match the confirmed item and attributes, such as model, color and visible condition?
-3. Tracking check: is a tracking number present, and what is its status? In the demo, use a mock carrier status endpoint.
+3. Tracking check: report a tracking number only when it is legible; carrier delivery status is not verified by the current prototype.
 
 Deterministic combiner:
 
 | Condition | Decision |
 | --- | --- |
-| Code missing or wrong | HOLD, ask the seller to resubmit |
+| Code missing or wrong | HOLD, ask the buyer to resubmit |
 | Item mismatch or low confidence | ASK\_BUYER |
 | All checks pass and tracking shows delivered | RELEASE |
 | Model error or timeout | ASK\_BUYER (fail closed) |
@@ -326,9 +326,9 @@ Environment variables:
 
 | Scenario | What happens | Expected result |
 | --- | --- | --- |
-| Honest deal | Hold approved, correct photo with code, tracking delivered | RELEASE, seller paid |
+| Honest deal | Hold approved, buyer receives the order and uploads a matching photo with the seller's code | RELEASE, seller paid |
 | Wrong item | Photo shows a different item | ASK\_BUYER, evidence shown, money held |
-| Missing code (stock photo) | Photo without the code | HOLD, seller asked to resubmit |
+| Missing code (stock photo) | Buyer photo without the code | HOLD, buyer asked to resubmit |
 | Seller vanishes | No shipment before the deadline | Auto-void, buyer protected |
 | Suspiciously cheap listing | Price far below Channel3 range | Warning before the hold |
 | Off-platform payment request | Seller says to pay directly | Scam warning to buyer |

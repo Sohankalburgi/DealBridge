@@ -33,6 +33,26 @@ PRODUCT_SEARCH_REQUEST = re.compile(
     r"\b(?:search|find|look(?:ing)?\s+for|browse)\b.{0,60}\b(?:product|products|item|items|thing|something)\b",
     re.IGNORECASE,
 )
+STRUCTURED_LISTING_ITEM = re.compile(
+    r"(?m)^\s*-?\s*Item\s*/\s*Service\s*:",
+    re.IGNORECASE,
+)
+STRUCTURED_LISTING_PRICE = re.compile(
+    r"(?m)^\s*-?\s*Price\s*&\s*Currency\s*:",
+    re.IGNORECASE,
+)
+NEW_LISTING_REQUEST = re.compile(
+    r"\b(?:add|create|start|make)\b.{0,40}\b(?:product|listing|item|deal)\b"
+    r"|\b(?:new|another)\s+(?:product|listing|item|deal)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_structured_listing(text: str) -> bool:
+    return bool(
+        STRUCTURED_LISTING_ITEM.search(text)
+        and STRUCTURED_LISTING_PRICE.search(text)
+    )
 
 def _participant_name(user) -> str:
     name = user.full_name.strip() or str(user.id)
@@ -519,17 +539,28 @@ async def generate_and_send_draft(update: Update, context: ContextTypes.DEFAULT_
     message = update.message if update.message else update.callback_query.message
     processing_msg = await message.reply_text("🤖 AI is structuring your deal terms...")
     
-    if 'draft_inputs' not in context.user_data:
-        context.user_data['draft_inputs'] = []
-    context.user_data['draft_inputs'].append(new_input)
-    
-    full_seller_notes = "\n".join(
-        [f"- Message {i+1}: {msg}" for i, msg in enumerate(context.user_data['draft_inputs'])]
-    )
-    existing_terms = context.user_data.get('draft_terms', "None yet.")
-    
-    ai_structured_terms = await analyze_product_with_ai(full_seller_notes, existing_terms)
-    
+    if _is_structured_listing(new_input):
+        context.user_data['draft_inputs'] = [new_input]
+        ai_structured_terms = new_input.strip()
+    else:
+        if 'draft_inputs' not in context.user_data:
+            context.user_data['draft_inputs'] = []
+        context.user_data['draft_inputs'].append(new_input)
+
+        full_seller_notes = "\n".join(
+            [f"- Message {i+1}: {msg}" for i, msg in enumerate(context.user_data['draft_inputs'])]
+        )
+        existing_terms = context.user_data.get('draft_terms', "None yet.")
+
+        ai_structured_terms = await analyze_product_with_ai(full_seller_notes, existing_terms)
+
+    if ai_structured_terms == "AI Analysis unavailable at the moment.":
+        context.user_data['state'] = 'WAITING_FOR_DEAL_UPDATES'
+        await processing_msg.edit_text(
+            "I couldn't draft the listing right now. Your details are still here; please try again in a moment or send the product details again."
+        )
+        return
+
     context.user_data['draft_terms'] = ai_structured_terms
     context.user_data['state'] = 'WAITING_FOR_DEAL_UPDATES'
     
@@ -739,43 +770,70 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if data.startswith("release_"):
         deal_id = data.split("_")[1]
         deal = deals_db.get(deal_id)
-        if not deal or update.effective_user.id != deal['buyer_id']:
+        if (
+            not deal
+            or update.effective_user.id != deal['buyer_id']
+            or deal.get('state') != 'NEEDS_BUYER_REVIEW'
+        ):
             return
 
         try:
             capture_id = await capture_authorization(deal.get('authorization_id', 'MOCK_AUTH'))
-            deal['capture_id'] = capture_id
-            deal['state'] = 'COMPLETED'
-
-            await query.edit_message_caption(
-                caption=f"✅ **You approved the proof!** Payment released (Capture ID: `{capture_id}`).",
-                parse_mode='Markdown'
-            )
-            await context.bot.send_message(
-                chat_id=deal['seller_id'],
-                text=f"🎉 **Buyer approved your proof!** Funds have been captured (`{capture_id}`). Deal completed!",
-                parse_mode='Markdown'
-            )
-        except Exception as e:
-            logger.error(f"Manual release capture failed: {e}")
+        except Exception:
+            logger.exception("Manual release capture failed for deal %s", deal_id)
             await context.bot.send_message(
                 chat_id=deal['buyer_id'],
-                text="❌ Error capturing payment with PayPal. Please try again."
+                text="❌ PayPal could not release the payment. The funds remain held; please try again later."
             )
+            return
+
+        deal['capture_id'] = capture_id
+        deal['state'] = 'COMPLETED'
+        try:
+            if query.message.caption is not None:
+                await query.edit_message_caption(
+                    caption=f"✅ **You approved the received-order proof!** Payment released (Capture ID: `{capture_id}`).",
+                    parse_mode='Markdown'
+                )
+            else:
+                await query.edit_message_text(
+                    f"✅ **You approved the received-order proof!** Payment released (Capture ID: `{capture_id}`).",
+                    parse_mode='Markdown'
+                )
+        except Exception:
+            logger.exception("Could not update buyer release message for deal %s", deal_id)
+        try:
+            await context.bot.send_message(
+                chat_id=deal['seller_id'],
+                text=f"🎉 **Buyer approved the received-order proof!** Funds have been captured (`{capture_id}`). Deal completed!",
+                parse_mode='Markdown'
+            )
+        except Exception:
+            logger.exception("Could not notify seller of manual release for deal %s", deal_id)
         return
 
     # 5. Handle Buyer Proof Dispute (When AI returns ASK_BUYER)
     if data.startswith("dispute_"):
         deal_id = data.split("_")[1]
         deal = deals_db.get(deal_id)
-        if not deal or update.effective_user.id != deal['buyer_id']:
+        if (
+            not deal
+            or update.effective_user.id != deal['buyer_id']
+            or deal.get('state') != 'NEEDS_BUYER_REVIEW'
+        ):
             return
 
         deal['state'] = 'DISPUTED'
-        await query.edit_message_caption(
-            caption="🚨 **Dispute Opened.** Your funds remain safely held and have NOT been captured.",
-            parse_mode='Markdown'
-        )
+        if query.message.caption is not None:
+            await query.edit_message_caption(
+                caption="🚨 **Dispute Opened.** Your funds remain safely held and have NOT been captured.",
+                parse_mode='Markdown'
+            )
+        else:
+            await query.edit_message_text(
+                "🚨 **Dispute Opened.** Your funds remain safely held and have NOT been captured.",
+                parse_mode='Markdown'
+            )
         await context.bot.send_message(
             chat_id=deal['seller_id'],
             text="🚨 **The buyer reported a problem with the proof.** Deal moved to `DISPUTED`handle_message for admin review; funds remain held.",
@@ -831,6 +889,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if RETRY_QUERY.search(text):
         await retry(update, context)
+        return
+
+    if NEW_LISTING_REQUEST.search(text) and not _is_structured_listing(text):
+        context.user_data["active_deal"] = None
+        context.user_data["draft_terms"] = "None yet."
+        context.user_data["draft_inputs"] = []
+        context.user_data["state"] = "WAITING_FOR_DEAL_UPDATES"
+        await message.reply_text(
+            "Sure — send the product or service details, including its price and currency, and I'll draft a new listing for you."
+        )
+        return
+
+    if _is_structured_listing(text):
+        context.user_data["active_deal"] = None
+        context.user_data["draft_terms"] = "None yet."
+        context.user_data["draft_inputs"] = []
+        await generate_and_send_draft(update, context, text)
         return
 
     current_state = context.user_data.get('state')
@@ -974,9 +1049,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
 
 
-# --- NEW: PHOTO PROOF HANDLER (Steps 6, 7 & 8) ---
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Processes fulfillment evidence photos sent by the seller."""
+    """Processes received-order evidence photos sent by the buyer."""
     active_deal_id = context.user_data.get('active_deal')
     if not active_deal_id or active_deal_id not in deals_db:
         await update.message.reply_text("Please join or create an active deal first.")
@@ -985,19 +1059,22 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     deal = deals_db[active_deal_id]
     user_id = update.effective_user.id
 
-    if user_id != deal['seller_id']:
-        await update.message.reply_text("Only the seller can upload fulfillment evidence.")
+    if user_id != deal['buyer_id']:
+        await update.message.reply_text("Only the buyer can upload a received-order photo.")
         return
 
     if deal['state'] not in ('FUNDS_HELD', 'HOLD_RESUBMIT'):
         await update.message.reply_text(
             f"⏳ Cannot submit proof right now (Current Deal State: `{deal['state']}`). "
-            "Wait until the buyer authorizes the payment hold.",
+            "The payment hold must be secured before you submit a received-order photo.",
             parse_mode='Markdown'
         )
         return
 
-    status_msg = await update.message.reply_text("🔍 **AI Vision Agent is inspecting your proof photo and verification code...**", parse_mode='Markdown')
+    status_msg = await update.message.reply_text(
+        "🔍 **AI Vision Agent is checking your received-order photo and the seller's code...**",
+        parse_mode='Markdown'
+    )
 
     # Download the highest-resolution photo into memory and encode to Base64
     photo_file = await update.message.photo[-1].get_file()
@@ -1021,7 +1098,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await status_msg.edit_text(
             f"❌ **Proof Rejected — Funds Remain Held**\n\n"
             f"**Reason:** {verdict['reason']}\n\n"
-            f"Please write `{deal.get('proof_code')}` clearly on paper next to the item and send a new photo.",
+            "Ask the seller to send the code in the deal chat if you don't have it, then upload a clear photo of the received item with the code visible.",
             parse_mode='Markdown'
         )
 
@@ -1031,7 +1108,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await status_msg.edit_text(
             f"⚠️ **Proof Submitted for Buyer Review**\n\n"
             f"**AI Notes:** {verdict['reason']}\n"
-            f"We've forwarded the photo to the buyer for final confirmation.",
+            f"The agent could not verify it automatically. Confirm receipt to release payment, or report a problem.",
             parse_mode='Markdown'
         )
 
@@ -1043,10 +1120,10 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             chat_id=deal['buyer_id'],
             photo=update.message.photo[-1].file_id,
             caption=(
-                f"📦 **Seller Uploaded Shipping Proof**\n\n"
+                f"📦 **Your Received-Order Photo Needs Review**\n\n"
                 f"**AI Verification:** {verdict['reason']}\n"
                 f"**Tracking:** `{verdict['tracking']}`\n\n"
-                f"Do you approve releasing the held funds to the seller?"
+                f"If you received the item as agreed, approve releasing the held funds to the seller. Otherwise, report a problem."
             ),
             reply_markup=InlineKeyboardMarkup(review_keyboard),
             parse_mode='Markdown'
@@ -1056,37 +1133,76 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     elif decision == "RELEASE":
         try:
             capture_id = await capture_authorization(deal.get('authorization_id', 'MOCK_AUTH'))
-            deal['capture_id'] = capture_id
-            deal['state'] = 'COMPLETED'
-
+        except Exception:
+            logger.exception("PayPal capture failed for deal %s", active_deal_id)
+            deal['state'] = 'NEEDS_BUYER_REVIEW'
             await status_msg.edit_text(
-                f"✅ **Proof Verified & Payment Released!**\n\n"
+                "❌ The photo was verified, but PayPal could not release the funds. "
+                "The hold remains in place; you can retry approval or report a problem."
+            )
+            review_keyboard = [
+                [InlineKeyboardButton("✅ Retry Release", callback_data=f"release_{active_deal_id}")],
+                [InlineKeyboardButton("🚨 Report Problem (Dispute)", callback_data=f"dispute_{active_deal_id}")]
+            ]
+            await context.bot.send_message(
+                chat_id=deal['buyer_id'],
+                text="Your received-order photo passed verification, but payment release failed. The funds remain held.",
+                reply_markup=InlineKeyboardMarkup(review_keyboard),
+            )
+            return
+
+        deal['capture_id'] = capture_id
+        deal['state'] = 'COMPLETED'
+        try:
+            await status_msg.edit_text(
+                f"✅ **Received-Order Photo Verified & Payment Released!**\n\n"
                 f"**AI Verdict:** {verdict['reason']}\n"
                 f"**PayPal Capture ID:** `{capture_id}`\n\n"
-                f"The funds have been transferred to your account!",
+                f"The held funds have been released to the seller.",
                 parse_mode='Markdown'
             )
+        except Exception:
+            logger.exception("Could not notify buyer of completed deal %s", active_deal_id)
 
+        try:
+            await context.bot.send_message(
+                chat_id=deal['seller_id'],
+                text=(
+                    f"🎉 **Buyer receipt verified — payment released!**\n"
+                    f"**AI Verdict:** {verdict['reason']}\n"
+                    f"**PayPal Capture ID:** `{capture_id}`\n"
+                    f"Deal #{active_deal_id} is complete."
+                ),
+                parse_mode='Markdown'
+            )
+        except Exception:
+            logger.exception("Could not notify seller of completed deal %s", active_deal_id)
+
+        try:
             await context.bot.send_photo(
                 chat_id=deal['buyer_id'],
                 photo=update.message.photo[-1].file_id,
                 caption=(
-                    f"✅ **Shipping Proof Verified — Deal Completed!**\n\n"
+                    f"✅ **Received-Order Photo Verified — Deal Completed!**\n\n"
                     f"**AI Verdict:** {verdict['reason']}\n"
                     f"**Tracking:** `{verdict['tracking']}`\n"
                     f"**PayPal Capture ID:** `{capture_id}`\n\n"
-                    f"Your payment hold has been released to the seller."
+                    f"The payment hold has been released to the seller."
                 ),
                 parse_mode='Markdown'
             )
-        except Exception as e:
-            logger.error(f"Capture failed: {e}")
-            await status_msg.edit_text("❌ AI verified the photo, but PayPal capture failed. Moving to manual review.")
+        except Exception:
+            logger.exception("Could not send verified photo to buyer for deal %s", active_deal_id)
 
 async def complete_payment_hold_notifications(context: ContextTypes.DEFAULT_TYPE, deal_id: str, auth_id: str) -> None:
     """Marks the deal as FUNDS_HELD and sends the proof code to the seller."""
     deal = deals_db.get(deal_id)
-    if not deal or deal.get('state') == 'FUNDS_HELD':
+    if not deal or deal.get('state') != 'WAITING_FOR_PAYMENT':
+        logger.info(
+            "Ignoring payment-hold notification for deal %s in state %s",
+            deal_id,
+            deal.get('state') if deal else "MISSING",
+        )
         return
 
     deal['state'] = 'FUNDS_HELD'
@@ -1096,7 +1212,7 @@ async def complete_payment_hold_notifications(context: ContextTypes.DEFAULT_TYPE
     await context.bot.send_message(
         chat_id=deal['buyer_id'],
         text=f"✅ **Payment Hold Secured!** (Auth ID: `{auth_id}`)\n"
-             f"Your funds are safely held in escrow. The seller has been instructed to fulfill the agreed terms and upload suitable evidence.",
+             f"Your funds are safely held in escrow. After the order arrives, upload a clear photo of the received item with the code from the seller visible. The agent will verify it before releasing payment.",
         parse_mode='Markdown'
     )
 
@@ -1104,9 +1220,8 @@ async def complete_payment_hold_notifications(context: ContextTypes.DEFAULT_TYPE
         chat_id=deal['seller_id'],
         text=f"✅ **Funds Secured in Escrow!** (Auth ID: `{auth_id}`)\n"
              f"The buyer has authorized the payment hold. It is now safe to fulfill the agreed terms.\n\n"
-             f"📸 **Action Required — Submit Fulfillment Evidence:**\n"
-             f"Include this one-time verification code in your evidence (place it beside physical goods, or include it in a screenshot for a non-physical transaction):\n\n"
+             f"📨 **Action Required — Send this one-time code to the buyer in the deal chat.** After the order arrives, the buyer must upload a photo with the code visible. The agent will verify the photo before releasing payment.\n\n"
              f"👉 **`{deal['proof_code']}`** 👈\n\n"
-             f"Send a photo or screenshot right here in the chat, with tracking details in the caption when applicable.",
+             f"Do not upload the proof photo yourself; the buyer submits it after receiving the order.",
         parse_mode='Markdown'
     )
