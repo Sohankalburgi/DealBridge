@@ -130,6 +130,7 @@ class DealsDatabase:
                 "buyer_id": {"type": "long"},
                 "buyer_name": {"type": "keyword"},
                 "buyer_username": {"type": "keyword"},
+                "buyer_shipping_address": {"type": "text"},
                 "seller_name": {"type": "keyword"},
                 "seller_username": {"type": "keyword"},
                 "state": {"type": "keyword"},

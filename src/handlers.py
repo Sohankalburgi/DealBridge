@@ -64,6 +64,62 @@ def _participant_name(user) -> str:
 def _deal_join_link(bot_username: str, deal_id: str) -> str:
     return f"https://t.me/{bot_username}?start=deal_{deal_id}"
 
+
+def _recent_deal_chat_context(deal: dict) -> str:
+    recent_messages = deal.get("conversation", [])[-12:]
+    return "\n".join(
+        f"{entry.get('sender_role', 'Participant')}: {str(entry.get('text', ''))[:1000]}"
+        for entry in recent_messages
+        if isinstance(entry, dict) and entry.get("text")
+    )
+
+
+def _is_terms_confirmation_message(text: str) -> bool:
+    if text.strip().endswith("?"):
+        return False
+
+    normalized_text = re.sub(r"[^\w\s']", " ", text.casefold())
+    normalized_text = " ".join(normalized_text.split())
+    normalized_text = re.sub(r"^(?:(?:ok|okay|yes|sure)\s+)+", "", normalized_text)
+    if normalized_text in {
+        "confirm",
+        "i confirm",
+        "i confirm the terms",
+        "i agree",
+        "i agree to the terms",
+        "i want to buy",
+        "i wanted to buy",
+        "i want to buy this",
+        "i want to buy it",
+        "i would like to buy",
+        "i would like to buy this",
+        "i'd like to buy",
+        "deal",
+        "deal done",
+        "it's a deal",
+        "lets do it",
+        "ready to pay",
+        "proceed to payment",
+        "order confirmed",
+        "the order is confirmed",
+        "confirm order",
+        "confirm the order",
+        "i confirm the order",
+        "i want to buy this product",
+        "i wanted to buy this product",
+        "i want to buy that product",
+        "i wanted to buy that product",
+        "i want to buy this item",
+        "i wanted to buy this item",
+    }:
+        return True
+
+    return bool(re.fullmatch(
+        r"i\s+(?:want(?:ed)?|would like|would love)\s+to buy\s+(?:this|that|it|this product|that product|this item|that item)",
+        normalized_text,
+    ))
+
+
 ORDER_HISTORY_QUERY = re.compile(
     r"\b(?:previous|prior|past|earlier|last)\b.{0,40}\b(?:orders?|deals?|purchases?)\b"
     r"|\b(?:orders?|deals?|purchases?)\b.{0,40}\b(?:previous|prior|past|details?|status|history)\b",
@@ -73,6 +129,83 @@ RETRY_QUERY = re.compile(
     r"\b(?:retry|try again|restart payment|resend payment|continue payment)\b",
     re.IGNORECASE,
 )
+MARKETPLACE_PURCHASE_INTENT = re.compile(
+    r"^\s*(?:(?:ok(?:ay)?|yes|sure)[,\s]+)*"
+    r"(?:i\s+(?:want(?:ed)?|would like|would love)\s+to buy|i'd like to buy|i want to order)"
+    r"(?:\s+(?P<product>.+))?\s*[.!]*\s*$",
+    re.IGNORECASE,
+)
+
+
+def _marketplace_purchase_intent(text: str) -> re.Match | None:
+    if text.strip().endswith("?"):
+        return None
+    return MARKETPLACE_PURCHASE_INTENT.fullmatch(text)
+
+
+def _purchase_product_query(match: re.Match) -> str:
+    product = _normalize_search_followup(match.group("product") or "")
+    product = re.sub(r"^(?:this|that|the)\s+", "", product, flags=re.IGNORECASE)
+    if product.casefold() in {"", "it", "this", "that", "product", "item", "this product", "that product", "this item", "that item", "one"}:
+        return ""
+    return product
+
+
+def _marketplace_join_keyboard(deal_ids: list[str]) -> InlineKeyboardMarkup:
+    buttons = []
+    for deal_id in deal_ids:
+        deal = deals_db.get(deal_id)
+        if deal:
+            item = str(deal.get("terms", "Product listing")).splitlines()[0][:40]
+            buttons.append(
+                [InlineKeyboardButton(f"Join {item}", callback_data=f"joinlisting_{deal_id}")]
+            )
+    return InlineKeyboardMarkup(buttons)
+
+
+def _restore_active_deal_context(user_id: int, context: ContextTypes.DEFAULT_TYPE):
+    active_deal_id = context.user_data.get("active_deal")
+    active_deal = deals_db.get(active_deal_id) if active_deal_id else None
+    if active_deal and user_id in (
+        active_deal.get("seller_id"),
+        active_deal.get("buyer_id"),
+    ):
+        return active_deal_id, active_deal
+
+    resumable_states = {
+        "JOINED",
+        "WAITING_FOR_SHIPPING_ADDRESS",
+        "PAYMENT_CREATING",
+        "WAITING_FOR_PAYMENT",
+        "FUNDS_HELD",
+        "PROOF_SUBMITTED",
+        "NEEDS_BUYER_REVIEW",
+        "HOLD_RESUBMIT",
+    }
+    try:
+        orders = deals_db.list_for_user(user_id, limit=20)
+    except Exception:
+        logger.exception("Could not restore active deal context for user %s", user_id)
+        return None, None
+
+    resumable_deals = [
+        deal for deal in orders
+        if deal.get("state") in resumable_states
+        and user_id in (deal.get("seller_id"), deal.get("buyer_id"))
+    ]
+    if len(resumable_deals) != 1:
+        return None, None
+
+    deal = resumable_deals[0]
+    deal_id = deal.get("deal_id", getattr(deal, "_deal_id", None))
+    if not deal_id:
+        logger.warning("Cannot restore active deal for user %s: deal ID is missing", user_id)
+        return None, None
+
+    context.user_data["active_deal"] = deal_id
+    context.user_data["state"] = None
+    logger.info("Restored active deal %s for user %s", deal_id, user_id)
+    return deal_id, deal
 
 
 async def search_products(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -113,7 +246,12 @@ async def search_products_by_text(update: Update, query_text: str) -> None:
     )
 
 
-async def search_marketplace_products(update: Update, query_text: str) -> None:
+async def search_marketplace_products(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    query_text: str,
+    show_results: bool = True,
+) -> None:
     user_id = update.effective_user.id
     try:
         results = deals_db.search_available_products(query_text)
@@ -122,29 +260,140 @@ async def search_marketplace_products(update: Update, query_text: str) -> None:
         await update.message.reply_text("Product search is unavailable right now. Please try again.")
         return
 
+    context.user_data["marketplace_search_query"] = query_text
+    context.user_data["marketplace_search_results"] = [
+        str(product.get("deal_id", ""))
+        for product in results
+        if product.get("deal_id") and product.get("seller_id") != user_id
+    ]
     if not results:
         await update.message.reply_text(
             f"I couldn't find an available listing for “{query_text}”. Try another product name or detail."
         )
         return
 
-    keyboard = []
-    for product in results:
-        deal_id = product.get("deal_id", "")
-        item = str(product.get("terms", "Product listing")).splitlines()[0][:40]
-        if product.get("seller_id") == user_id:
-            action = f"share_{deal_id}"
-            action_text = "Your listing"
-        else:
-            action = f"product_{deal_id}"
-            action_text = "View"
-        keyboard.append(
-            [InlineKeyboardButton(f"{item} · {action_text}", callback_data=action)]
+    if show_results:
+        keyboard = []
+        for product in results:
+            deal_id = product.get("deal_id", "")
+            item = str(product.get("terms", "Product listing")).splitlines()[0][:40]
+            if product.get("seller_id") == user_id:
+                action = f"share_{deal_id}"
+                action_text = "Your listing"
+            else:
+                action = f"product_{deal_id}"
+                action_text = "View"
+            keyboard.append(
+                [InlineKeyboardButton(f"{item} · {action_text}", callback_data=action)]
+            )
+        await update.message.reply_text(
+            f"Here are available listings matching “{query_text}”:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
         )
-    await update.message.reply_text(
-        f"Here are available listings matching “{query_text}”:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+
+
+async def join_marketplace_listing(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    deal_id: str,
+    query=None,
+) -> bool:
+    deal = deals_db.get(deal_id)
+    user = update.effective_user
+    if (
+        not deal
+        or deal.get("state") != "CREATED"
+        or deal.get("buyer_id") not in (None, user.id)
+        or deal.get("seller_id") == user.id
+    ):
+        error = "This listing is no longer available to join."
+        if query:
+            await query.edit_message_text(error)
+        else:
+            await update.effective_message.reply_text(error)
+        context.user_data["marketplace_search_results"] = []
+        return False
+
+    deal.update_fields({
+        "buyer_id": user.id,
+        "buyer_name": _participant_name(user),
+        "buyer_username": user.username or "",
+        "state": "JOINED",
+    })
+    context.user_data["state"] = None
+    context.user_data["active_deal"] = deal_id
+    context.user_data["marketplace_search_results"] = []
+    joined_text = (
+        f"You joined deal #{deal_id}.\n\n"
+        f"{deal.get('terms', 'No deal terms recorded.')}\n\n"
+        "Ask the AI about the product or describe what you need to see how the listed details fit. "
+        "It answers from the seller's description and deal terms, and will point out details that aren't specified. "
+        "You can also chat with the seller here. Review and confirm the terms when ready."
     )
+    confirm_markup = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Confirm Terms", callback_data=f"confirm_{deal_id}")
+    ]])
+    if query:
+        await query.edit_message_text(
+            joined_text,
+            reply_markup=confirm_markup,
+        )
+    else:
+        await update.effective_message.reply_text(
+            joined_text,
+            reply_markup=confirm_markup,
+        )
+
+    await context.bot.send_message(
+        chat_id=deal["seller_id"],
+        text=f"Buyer joined: {_participant_name(user)}\nDeal #{deal_id} is now connected.",
+    )
+    await context.bot.send_message(
+        chat_id=deal["seller_id"],
+        text=f"Proposed deal terms for #{deal_id}:\n\n{deal.get('terms', '')}",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Confirm Terms", callback_data=f"confirm_{deal_id}")
+        ]]),
+    )
+    return True
+
+
+async def handle_marketplace_purchase_intent(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    purchase_intent: re.Match,
+) -> bool:
+    """Resolve a buyer's conversational purchase intent against their recent search."""
+    deal_ids = context.user_data.get("marketplace_search_results", [])
+    product_query = _purchase_product_query(purchase_intent)
+    last_query = str(context.user_data.get("marketplace_search_query", ""))
+    if product_query and product_query.casefold() != last_query.casefold():
+        await search_marketplace_products(
+            update,
+            context,
+            product_query,
+            show_results=False,
+        )
+        deal_ids = context.user_data.get("marketplace_search_results", [])
+
+    if len(deal_ids) == 1:
+        await join_marketplace_listing(update, context, deal_ids[0])
+        return True
+    if len(deal_ids) > 1:
+        await update.effective_message.reply_text(
+            "I found several listings. Choose which one you want to buy:",
+            reply_markup=_marketplace_join_keyboard(deal_ids),
+        )
+        return True
+
+    if not product_query:
+        context.user_data["state"] = "WAITING_FOR_MARKETPLACE_PURCHASE_PRODUCT"
+        await update.effective_message.reply_text(
+            "I couldn't identify a listing to buy yet. Search for the product first, "
+            "or tell me its name (for example, “I want to buy a keychain”)."
+        )
+        return True
+    return True
 
 
 def _normalize_search_followup(text: str) -> str:
@@ -204,13 +453,74 @@ def extract_price_and_currency(terms_text: str):
     return amount, currency
 
 
+async def _create_and_send_payment_link(
+    context: ContextTypes.DEFAULT_TYPE, deal_id: str
+) -> None:
+    """Create the buyer's checkout after their shipping address has been saved."""
+    deal = deals_db.get(deal_id)
+    if not deal or not deal.get("buyer_shipping_address"):
+        return
+
+    deal["state"] = "PAYMENT_CREATING"
+    try:
+        original_amount, original_currency = extract_price_and_currency(deal["terms"])
+        paypal_amount, paypal_currency = prepare_paypal_amount(
+            original_amount,
+            original_currency
+        )
+        if paypal_amount <= 0:
+            raise ValueError("The deal price must be greater than zero.")
+
+        amount = f"{paypal_amount:.2f}"
+        currency = paypal_currency
+        approval_url = await create_authorize_order(
+            deal_id=deal_id, amount=amount, currency=currency
+        )
+        if not approval_url:
+            raise ValueError("PayPal did not return an approval URL.")
+    except Exception:
+        logger.exception("Could not generate the PayPal payment link for deal %s", deal_id)
+        deal["state"] = "PAYMENT_SETUP_FAILED"
+        error_text = (
+            "❌ Could not generate the PayPal payment link. Your saved shipping address "
+            "is still on the deal; use /retry to try again."
+        )
+        await context.bot.send_message(chat_id=deal["seller_id"], text=error_text)
+        await context.bot.send_message(chat_id=deal["buyer_id"], text=error_text)
+        return
+
+    deal.update_fields(
+        {
+            "paypal_approval_url": approval_url,
+            "state": "WAITING_FOR_PAYMENT",
+        }
+    )
+    pay_keyboard = [
+        [InlineKeyboardButton(f"💳 1. Approve {amount} {currency} on PayPal", url=approval_url)],
+        [InlineKeyboardButton("✅ 2. I've Approved — Verify Now", callback_data=f"verifypay_{deal_id}")],
+    ]
+    await context.bot.send_message(
+        chat_id=deal["seller_id"],
+        text=f"🎉 **Deal Confirmed ({amount} {currency})!**\nThe buyer's secure PayPal hold link has been created.",
+        parse_mode="Markdown",
+    )
+    await context.bot.send_message(
+        chat_id=deal["buyer_id"],
+        text=f"🔒 **Action Required:**\nPlease authorize the **{amount} {currency}** payment hold on PayPal. No money will be captured until delivery is proven.",
+        reply_markup=InlineKeyboardMarkup(pay_keyboard),
+        parse_mode="Markdown",
+    )
+
+
 async def trigger_user_confirmation(context: ContextTypes.DEFAULT_TYPE, deal_id: str, user_id: int) -> None:
-    """Shared logic to confirm terms via button OR chat text and trigger PayPal."""
+    """Confirm terms and request a shipping address before creating PayPal checkout."""
     deal = deals_db.get(deal_id)
     if not deal or deal['state'] in (
+        'WAITING_FOR_SHIPPING_ADDRESS',
         'WAITING_FOR_PAYMENT',
         'FUNDS_HELD',
-        'PAYMENT_CREATING'
+        'PAYMENT_CREATING',
+        'PAYMENT_SETUP_FAILED',
     ):
         return
 
@@ -235,60 +545,67 @@ async def trigger_user_confirmation(context: ContextTypes.DEFAULT_TYPE, deal_id:
             deal, user_id, 'buyer_confirmed_terms'
         )
 
-    # If both parties are confirmed, trigger the PayPal Hold Link
+    # Ask for the address once both parties agree, before creating checkout.
     if deal['seller_confirmed_terms'] and deal['buyer_confirmed_terms']:
-        deal['state'] = 'PAYMENT_CREATING'
-        try:
-            original_amount, original_currency = extract_price_and_currency(deal['terms'])
-            paypal_amount, paypal_currency = prepare_paypal_amount(
-                original_amount,
-                original_currency
-            )
-            if paypal_amount <= 0:
-                raise ValueError("The deal price must be greater than zero.")
+        if deal.get("buyer_shipping_address"):
+            await _create_and_send_payment_link(context, deal_id)
+            return
 
-            amount = f"{paypal_amount:.2f}"
-            currency = paypal_currency
-            await context.bot.send_message(
-                chat_id=deal['seller_id'],
-                text=f"🎉 **Deal Confirmed ({amount} {currency})!**\nGenerating the secure PayPal hold link for the buyer...",
-                parse_mode='Markdown'
-            )
+        deal["state"] = "WAITING_FOR_SHIPPING_ADDRESS"
+        await context.bot.send_message(
+            chat_id=deal["buyer_id"],
+            text=(
+                "✅ The deal is confirmed. Before I create your payment link, please send "
+                "the full delivery address, including recipient name, street, city, postal "
+                "code, and country. Your address will be saved with this deal."
+            ),
+        )
+        await context.bot.send_message(
+            chat_id=deal["seller_id"],
+            text="✅ The deal is confirmed. The buyer is being asked for a delivery address before checkout is created.",
+        )
 
-            buyer_msg = await context.bot.send_message(
-                chat_id=deal['buyer_id'],
-                text=f"🎉 **Deal Confirmed ({amount} {currency})!**\nGenerating your secure PayPal hold link...",
-                parse_mode='Markdown'
-            )
 
-            approval_url = await create_authorize_order(deal_id=deal_id, amount=amount, currency=currency)
-            if not approval_url:
-                raise ValueError("PayPal did not return an approval URL.")
-            deal['paypal_approval_url'] = approval_url
-            
-            pay_keyboard = [
-                [InlineKeyboardButton(f"💳 1. Approve {amount} {currency} on PayPal", url=approval_url)],
-                [InlineKeyboardButton("✅ 2. I've Approved — Verify Now", callback_data=f"verifypay_{deal_id}")]
-            ]
-            pay_markup = InlineKeyboardMarkup(pay_keyboard)
-            
-            await buyer_msg.edit_text(
-                f"🔒 **Action Required:**\nPlease authorize the **{amount} {currency}** payment hold on PayPal. No money will be captured until delivery is proven.",
-                reply_markup=pay_markup,
-                parse_mode='Markdown'
-            )
-            
-            deal['state'] = 'WAITING_FOR_PAYMENT'
-            
-        except Exception as e:
-            logger.error(f"PayPal Error: {e}")
-            deal['state'] = 'JOINED'
-            error_text = (
-                "❌ Could not generate the PayPal payment link. "
-                "Please check the deal price/currency and PayPal configuration, then confirm the terms again."
-            )
-            await context.bot.send_message(chat_id=deal['seller_id'], text=error_text)
-            await context.bot.send_message(chat_id=deal['buyer_id'], text=error_text)
+async def handle_buyer_shipping_address(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    text: str,
+) -> bool:
+    """Save a buyer's address privately and start payment setup for the active deal."""
+    deal_id = context.user_data.get("active_deal")
+    deal = deals_db.get(deal_id) if deal_id else None
+    if (
+        not deal
+        or deal.get("state") != "WAITING_FOR_SHIPPING_ADDRESS"
+        or update.effective_user.id != deal.get("buyer_id")
+    ):
+        return False
+
+    address = text.strip()
+    if _is_terms_confirmation_message(address):
+        await update.message.reply_text(
+            "The deal terms are already confirmed. Please send your full delivery address, "
+            "including recipient name, street, city, postal code, and country."
+        )
+        return True
+
+    if not address:
+        await update.message.reply_text(
+            "Please send your full delivery address, including recipient name, street, city, postal code, and country."
+        )
+        return True
+
+    deal.update_fields(
+        {
+            "buyer_shipping_address": address,
+            "state": "PAYMENT_CREATING",
+        }
+    )
+    await update.message.reply_text(
+        "Your delivery address has been saved with this deal. I'm creating your payment link now."
+    )
+    await _create_and_send_payment_link(context, deal_id)
+    return True
 
 async def update_deal_terms_from_message(
     context: ContextTypes.DEFAULT_TYPE,
@@ -413,6 +730,23 @@ async def retry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
+    if deal.get("state") == "WAITING_FOR_SHIPPING_ADDRESS":
+        if user_id == deal.get("buyer_id"):
+            await update.message.reply_text(
+                "Please send your full delivery address here before checkout can be created."
+            )
+        else:
+            await update.message.reply_text("The buyer still needs to provide a delivery address.")
+        return
+
+    if deal.get("state") == "PAYMENT_SETUP_FAILED":
+        if user_id != deal.get("buyer_id"):
+            await update.message.reply_text("The buyer must retry payment setup for this deal.")
+            return
+        await update.message.reply_text("Retrying payment setup with your saved delivery address...")
+        await _create_and_send_payment_link(context, deal_id)
+        return
+
     if (
         deal.get("state") in ("CREATED", "JOINED")
         and deal.get("seller_confirmed_terms")
@@ -499,7 +833,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             
             await update.message.reply_text(
                 f"Welcome {user.first_name}! You've securely joined deal `{deal_id}` as the buyer.\n\n"
-                "Connecting you to the seller's chat... You can now type messages here to talk to them."
+                "You can ask the AI about the product or describe what you need to see how the listed details fit. "
+                "It answers from the seller's description and deal terms, and will point out details that aren't specified. "
+                "You can also message the seller directly in this chat."
             )
             
             seller_id = deals_db[deal_id]['seller_id']
@@ -694,44 +1030,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if data.startswith("joinlisting_"):
         deal_id = data.removeprefix("joinlisting_")
-        deal = deals_db.get(deal_id)
-        user = update.effective_user
-        if (
-            not deal
-            or deal.get("state") != "CREATED"
-            or deal.get("buyer_id") not in (None, user.id)
-            or deal.get("seller_id") == user.id
-        ):
-            await query.edit_message_text("This listing is no longer available to join.")
-            return
-
-        deal.update_fields({
-            "buyer_id": user.id,
-            "buyer_name": _participant_name(user),
-            "buyer_username": user.username or "",
-            "state": "JOINED",
-        })
-        context.user_data["state"] = None
-        context.user_data["active_deal"] = deal_id
-        await query.edit_message_text(
-            f"You joined deal #{deal_id}.\n\n"
-            f"{deal.get('terms', 'No deal terms recorded.')}\n\n"
-            "You can now chat with the seller here. Review and confirm the terms when ready.",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("✅ Confirm Terms", callback_data=f"confirm_{deal_id}")
-            ]]),
-        )
-        await context.bot.send_message(
-            chat_id=deal["seller_id"],
-            text=f"Buyer joined: {_participant_name(user)}\nDeal #{deal_id} is now connected.",
-        )
-        await context.bot.send_message(
-            chat_id=deal["seller_id"],
-            text=f"Proposed deal terms for #{deal_id}:\n\n{deal.get('terms', '')}",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("✅ Confirm Terms", callback_data=f"confirm_{deal_id}")
-            ]]),
-        )
+        await join_marketplace_listing(update, context, deal_id, query)
         return
 
     if data.startswith("resume_"):
@@ -871,6 +1170,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     text = message.text
 
+    if await handle_buyer_shipping_address(update, context, text):
+        return
+
     if ORDER_HISTORY_QUERY.search(text):
         _, history = _order_history_for_ai(update.effective_user.id)
         answer = await answer_order_history_question(text, history)
@@ -908,21 +1210,72 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await generate_and_send_draft(update, context, text)
         return
 
-    current_state = context.user_data.get('state')
+    current_state = context.user_data.get("state")
+    purchase_intent = _marketplace_purchase_intent(text)
+    active_deal_id = context.user_data.get("active_deal")
+    active_deal = deals_db.get(active_deal_id) if active_deal_id else None
+    if not active_deal and (
+        purchase_intent or _is_terms_confirmation_message(text)
+    ):
+        active_deal_id, active_deal = _restore_active_deal_context(
+            update.effective_user.id,
+            context,
+        )
+    active_participant = bool(
+        active_deal
+        and update.effective_user.id
+        in (active_deal.get("seller_id"), active_deal.get("buyer_id"))
+    )
+    if active_participant and _is_terms_confirmation_message(text):
+        context.user_data["state"] = None
+        current_state = None
+
+    if current_state == "WAITING_FOR_MARKETPLACE_PURCHASE_PRODUCT" and not active_participant:
+        product_query = _normalize_search_followup(text)
+        if product_query.casefold() in {"yes", "yes please", "ok", "okay", "sure", "this product", "that product", "it"}:
+            await message.reply_text(
+                "Which product would you like to buy? Please send its name, such as “keychain”."
+            )
+            return
+        await search_marketplace_products(
+            update,
+            context,
+            product_query,
+            show_results=False,
+        )
+        deal_ids = context.user_data.get("marketplace_search_results", [])
+        if len(deal_ids) == 1:
+            await join_marketplace_listing(update, context, deal_ids[0])
+        elif len(deal_ids) > 1:
+            await message.reply_text(
+                "I found several listings. Choose which one you want to buy:",
+                reply_markup=_marketplace_join_keyboard(deal_ids),
+            )
+        elif not deal_ids:
+            context.user_data["state"] = "WAITING_FOR_MARKETPLACE_PURCHASE_PRODUCT"
+        return
+
+    if purchase_intent and not active_participant:
+        await handle_marketplace_purchase_intent(update, context, purchase_intent)
+        return
+
     if current_state == "WAITING_FOR_PRODUCT_SEARCH":
         query_text = _normalize_search_followup(text)
         if not query_text:
             await message.reply_text("What product or service are you looking for? For example: running shoes or iPhone 15.")
             return
         context.user_data["state"] = None
-        await search_marketplace_products(update, query_text)
+        await search_marketplace_products(update, context, query_text)
         return
 
     if current_state == 'WAITING_FOR_DEAL_UPDATES':
         await process_deal_update(update, context)
         return
 
-    if PRODUCT_SEARCH_REQUEST.search(text) or await classify_product_search_intent(text):
+    if PRODUCT_SEARCH_REQUEST.search(text) or (
+        not (active_participant and _is_terms_confirmation_message(text))
+        and await classify_product_search_intent(text)
+    ):
         query_text = _normalize_search_followup(
             await extract_product_search_query(text)
         )
@@ -932,11 +1285,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 "Sure, I can search available listings. What product or service are you looking for?"
             )
             return
-        await search_marketplace_products(update, query_text)
+        await search_marketplace_products(update, context, query_text)
         return
 
-    active_deal_id = context.user_data.get('active_deal')
-    
     if active_deal_id and active_deal_id in deals_db:
         deal = deals_db[active_deal_id]
         user_id = update.effective_user.id
@@ -970,23 +1321,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 return
 
         # Classify both participants' messages and dispatch only deal-relevant intents.
-        normalized_text = re.sub(
-            r"[.!?,]+$",
-            "",
-            text.lower().strip()
-        )
-        confirmation_phrases = {
-            "i want to buy",
-            "confirm",
-            "i confirm",
-            "i agree",
-            "i agree to the terms",
-            "let's do it",
-            "deal",
-            "ready to pay",
-            "proceed to payment"
-        }
-        intent = await classify_chat_intent(text, sender_role, deal.get("terms", ""))
+        message_confirms_terms = _is_terms_confirmation_message(text)
+        if message_confirms_terms:
+            intent = "CONFIRM_TERMS"
+        else:
+            intent = await classify_chat_intent(text, sender_role, deal.get("terms", ""))
         logger.info(
             "Deal chat intent: deal=%s role=%s user=%s intent=%s",
             active_deal_id,
@@ -994,7 +1333,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             user_id,
             intent,
         )
-        is_confirming = normalized_text in confirmation_phrases or intent == "CONFIRM_TERMS"
+        is_confirming = message_confirms_terms or intent == "CONFIRM_TERMS"
 
         # 3. AI Scam Check & Relay
         scam_analysis = await check_message_for_scams(text)
@@ -1009,16 +1348,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             return
 
         if intent == "ASK_DEAL_QUESTION" and not is_confirming:
-            ai_answer = await answer_participant_question(text, deal["terms"], sender_role)
-            if ai_answer.strip() != "FORWARD_TO_PARTICIPANT":
-                await update.message.reply_text(f"🤖 AI Deal Agent:\n{ai_answer}")
-                try:
-                    await context.bot.send_message(
-                        chat_id=recipient_id,
-                        text=f"🤖 AI Deal Agent answered {sender_role.lower()} ({sender_name}):\n{ai_answer}",
-                    )
-                except Exception as e:
-                    logger.error("Failed to relay deal question answer: %s", e)
+            ai_answer = await answer_participant_question(
+                text,
+                deal.get("terms", ""),
+                sender_role,
+                deal.get("raw_description", ""),
+                _recent_deal_chat_context(deal),
+            )
+            await update.message.reply_text(f"🤖 AI Deal Agent:\n{ai_answer}")
+            try:
+                await context.bot.send_message(
+                    chat_id=recipient_id,
+                    text=f"🤖 AI Deal Agent answered {sender_role.lower()} ({sender_name}):\n{ai_answer}",
+                )
+            except Exception as e:
+                logger.error("Failed to relay deal question answer: %s", e)
             return
 
         if intent == "UPDATE_TERMS":
@@ -1037,6 +1381,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 f"user={user_id}, deal={active_deal_id}"
             )
             await trigger_user_confirmation(context, active_deal_id, user_id)
+            if sender_role == "Buyer" and message_confirms_terms:
+                if deal.get("state") in ("CREATED", "JOINED"):
+                    await update.message.reply_text(
+                        "✅ You confirmed the current terms for this listing. "
+                        "The seller must also confirm before checkout can be prepared. "
+                        "You will still review and authorize the PayPal payment yourself."
+                    )
+                    await context.bot.send_message(
+                        chat_id=deal["seller_id"],
+                        text=f"✅ The buyer confirmed the current terms for deal #{active_deal_id}. "
+                        "Please review and confirm the terms to continue.",
+                    )
 
     elif await classify_listing_intent(text):
         context.user_data["draft_terms"] = "None yet."

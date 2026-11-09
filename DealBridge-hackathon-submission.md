@@ -8,6 +8,8 @@ Informal online deals often rely on trust and scattered messages. We wanted to m
 
 DealBridge turns Telegram conversations into structured deal terms, flags potential scam signals, and helps verify delivery proof. PayPal authorization can hold funds while the agreed deal checks are completed.
 
+When a buyer opens a listing link, they can ask the AI about the product or describe their needs. The assistant uses the seller's description, current deal terms, and recent buyer-seller chat to answer accurately, explain which listed details match those needs, and call out information that is not specified.
+
 ## How we built it
 
 We built a Telegram bot and FastAPI service in Python, using Groq-powered AI for deal assistance, PayPal APIs for payment authorization, and Elasticsearch to store deal data.
