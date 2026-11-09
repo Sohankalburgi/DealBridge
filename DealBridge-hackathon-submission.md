@@ -6,13 +6,20 @@ Informal online deals often rely on trust and scattered messages. We wanted to m
 
 ## What it does
 
-DealBridge turns Telegram conversations into structured deal terms, flags potential scam signals, and helps verify delivery proof. PayPal authorization can hold funds while the agreed deal checks are completed.
+DealBridge turns informal Telegram negotiations into structured, safer deals. It uses AI to draft and update deal terms, highlights scam risk signals, and helps confirm delivery proof before a transaction is considered complete.
 
-When a buyer opens a listing link, they can ask the AI about the product or describe their needs. The assistant uses the seller's description, current deal terms, and recent buyer-seller chat to answer accurately, explain which listed details match those needs, and call out information that is not specified.
+Key features include:
+
+- AI deal copilot: turns chat into a clear deal summary with pricing, quantity, timeline, delivery expectations, and buyer/seller responsibilities.
+- Scam signal detection: flags risky language, urgency pressure, suspicious payment instructions, and mismatches between the listing and the chat.
+- Needs-based product guidance: when a buyer opens a listing, they can ask the AI to match the product against their requirements and point out missing or unclear details.
+- Delivery proof review: helps both parties compare uploaded proof, shipping details, and agreed conditions before releasing funds or marking the deal complete.
+- PayPal Sandbox authorization: enables a held-funds flow so the transaction can pause while the deal checks finish, without treating the prototype as a regulated escrow service.
+- Human-in-the-loop safety checks: every sensitive action, including payment authorization and dispute progression, is designed to require clear confirmation from both sides.
 
 ## How we built it
 
-We built a Telegram bot and FastAPI service in Python, using Groq-powered AI for deal assistance, PayPal APIs for payment authorization, and Elasticsearch to store deal data.
+We built a Telegram-first experience with a Python FastAPI backend, Groq-powered AI for deal understanding and drafting, PayPal APIs for sandbox payment authorization, and Elasticsearch for structured deal data and retrieval. The system coordinates chat context, deal status, risk checks, and proof verification into one workflow.
 
 ## Challenges we ran into
 
@@ -20,12 +27,12 @@ Keeping deal terms consistent as conversations evolve, coordinating payment and 
 
 ## Accomplishments that we're proud of
 
-We brought deal creation, AI assistance, delivery proof, and PayPal payment authorization together in one prototype.
+We brought together AI-assisted deal drafting, scam-risk detection, delivery-proof review, and PayPal Sandbox authorization in one end-to-end prototype. We also made the workflow feel natural inside Telegram, where buyers and sellers already negotiate.
 
 ## What we learned
 
-AI can help people make better-informed decisions, but payment actions need clear rules and explicit human approval.
+AI can make informal deals easier to understand and safer to evaluate, but trust-sensitive actions like payment holds and dispute resolution need explicit review, transparent rules, and human approval.
 
 ## What's next for DealBridge
 
-Add dispute handling, live price checks, a judge-friendly dashboard, and a hosted demo with a smoother onboarding experience.
+Add stronger dispute workflows, live product-price validation, a more detailed verification dashboard for deal evidence, and a smoother hosted demo onboarding flow for real-world testing.
