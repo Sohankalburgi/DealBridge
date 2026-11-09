@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: dealbridge
+    runtime: python
+    rootDir: src
+    buildCommand: python -m pip install -r requirements.txt
+    startCommand: python main.py
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.11
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: ELASTICSEARCH_URL
+        sync: false

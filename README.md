@@ -63,6 +63,18 @@ python main.py
 
 The bot starts polling Telegram, and the FastAPI service listens on `http://localhost:8000`. The app creates its Elasticsearch index on startup if it does not already exist.
 
+## Deploy on Render
+
+This deploys the Telegram bot and FastAPI service together as one Render web service. The app also needs a separately hosted Elasticsearch cluster; Render does not create one for this Blueprint.
+
+1. Create an Elasticsearch deployment (for example, in Elastic Cloud) and have its HTTPS endpoint and credentials/API key ready.
+2. In Render, choose **New → Blueprint**, connect this repository, and deploy using [`render.yaml`](render.yaml). The Blueprint prompts for `TELEGRAM_BOT_TOKEN`, `GROQ_API_KEY`, and `ELASTICSEARCH_URL`.
+3. In the Render service's **Environment** settings, add the Elasticsearch authentication variables for your cluster: either `ELASTICSEARCH_API_KEY`, or both `ELASTICSEARCH_USERNAME` and `ELASTICSEARCH_PASSWORD`.
+4. If using PayPal, add `PAYPAL_CLIENT_ID` and `PAYPAL_CLIENT_SECRET`. The default API is PayPal Sandbox. The app uses Render's public service URL for payment redirects automatically; set `PUBLIC_BASE_URL` only if you need to override it.
+5. Keep a single always-on instance. The service runs Telegram polling and the web server in the same process, so multiple instances can conflict over polling, and a sleeping free instance will stop responding to bot updates.
+
+Once deployed, check `https://<your-service>.onrender.com/health` for `{"status":"ok"}`. Keep all credentials in Render's environment settings—never commit `src/.env`.
+
 ## Telegram commands
 
 - `/start` — Start the bot or begin creating/joining a deal.

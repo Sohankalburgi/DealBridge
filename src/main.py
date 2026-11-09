@@ -1,4 +1,5 @@
 import asyncio
+import os
 from contextlib import asynccontextmanager
 import uvicorn
 from fastapi import FastAPI, Request
@@ -28,6 +29,10 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 telegram_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
 
 async def mark_funds_held(deal_id: str, auth_id: str):
     """Updates deal state to FUNDS_HELD and notifies buyer and seller on Telegram."""
@@ -107,9 +112,10 @@ async def main():
     await telegram_app.updater.start_polling()
     logger.info("Telegram Bot is polling...")
 
-    config = uvicorn.Config(app=app, host="0.0.0.0", port=8000, log_level="info")
+    port = int(os.environ.get("PORT", "8000"))
+    config = uvicorn.Config(app=app, host="0.0.0.0", port=port, log_level="info")
     server = uvicorn.Server(config)
-    logger.info("FastAPI Server running on http://localhost:8000")
+    logger.info("FastAPI Server listening on port %s", port)
     await server.serve()
 
     await telegram_app.updater.stop()

@@ -19,7 +19,10 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 # --- PAYPAL & SERVER CONFIG ---
 PAYPAL_CLIENT_ID = os.getenv("PAYPAL_CLIENT_ID", "")
 PAYPAL_CLIENT_SECRET = os.getenv("PAYPAL_CLIENT_SECRET", "")
-PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "http://localhost:8000").rstrip("/")
+PUBLIC_BASE_URL = os.getenv(
+    "PUBLIC_BASE_URL",
+    os.getenv("RENDER_EXTERNAL_URL", "http://localhost:8000"),
+).rstrip("/")
 PAYPAL_API_BASE = os.getenv("PAYPAL_API_BASE", "https://api-m.sandbox.paypal.com")
 
 # --- ELASTICSEARCH CONFIG ---
