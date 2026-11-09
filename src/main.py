@@ -29,6 +29,61 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 telegram_app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+telegram_bot_username: str | None = None
+
+
+@app.get("/", response_class=HTMLResponse)
+async def homepage():
+    if not telegram_bot_username:
+        return HTMLResponse("Telegram bot is not ready yet.", status_code=503)
+
+    return f"""<!doctype html>
+    <html lang="en">
+      <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <meta name="theme-color" content="#101827">
+        <title>DealBridge — Make your next deal clearer</title>
+        <style>
+          * {{ box-sizing: border-box; }}
+          body {{
+            margin: 0;
+            min-height: 100vh;
+            display: grid;
+            place-items: center;
+            padding: 24px;
+            color: #f4f7fb;
+            background: radial-gradient(ellipse at 50% 0, #233b62, #101827 68%);
+            font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+          }}
+          main {{ width: min(100%, 640px); text-align: center; }}
+          .mark {{ color: #7dd3fc; font-size: 15px; font-weight: 700; letter-spacing: .12em; }}
+          h1 {{ margin: 22px 0 16px; font-size: clamp(40px, 8vw, 68px); line-height: 1.05; }}
+          p {{ margin: 0 auto 30px; max-width: 500px; color: #bdc9d9; font-size: 18px; line-height: 1.65; }}
+          a {{
+            display: inline-block;
+            padding: 15px 24px;
+            border-radius: 12px;
+            color: #082032;
+            background: #7dd3fc;
+            font-weight: 750;
+            text-decoration: none;
+            transition: background .15s ease, transform .15s ease;
+          }}
+          a:hover {{ background: #a5e3fc; transform: translateY(-2px); }}
+          .note {{ margin-top: 20px; font-size: 14px; }}
+        </style>
+      </head>
+      <body>
+        <main>
+          <div class="mark">DEALBRIDGE</div>
+          <h1>Make your next deal clearer.</h1>
+          <p>Turn your product or service details into a clear listing, and keep buyers and sellers on the same page—all through Telegram.</p>
+          <a href="https://t.me/{telegram_bot_username}?start=seller">Start selling with the Telegram bot</a>
+          <p class="note">Opens Telegram. Send a message to the bot to create your first listing.</p>
+        </main>
+      </body>
+    </html>"""
 
 @app.get("/health")
 async def health():
@@ -108,6 +163,11 @@ async def main():
     telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     await telegram_app.initialize()
+    global telegram_bot_username
+    bot_info = await telegram_app.bot.get_me()
+    if not bot_info.username:
+        raise RuntimeError("The configured Telegram bot does not have a username.")
+    telegram_bot_username = bot_info.username
     await telegram_app.start()
     await telegram_app.updater.start_polling()
     logger.info("Telegram Bot is polling...")

@@ -73,7 +73,7 @@ This deploys the Telegram bot and FastAPI service together as one Render web ser
 4. If using PayPal, add `PAYPAL_CLIENT_ID` and `PAYPAL_CLIENT_SECRET`. The default API is PayPal Sandbox. The app uses Render's public service URL for payment redirects automatically; set `PUBLIC_BASE_URL` only if you need to override it.
 5. Keep a single always-on instance. The service runs Telegram polling and the web server in the same process, so multiple instances can conflict over polling, and a sleeping free instance will stop responding to bot updates.
 
-Once deployed, check `https://<your-service>.onrender.com/health` for `{"status":"ok"}`. Keep all credentials in Render's environment settings—never commit `src/.env`.
+Once deployed, the service homepage (`https://<your-service>.onrender.com`) provides a **Start selling with the Telegram bot** link. It points directly to the configured bot. Check `/health` for `{"status":"ok"}`. Keep all credentials in Render's environment settings—never commit `src/.env`.
 
 ## Telegram commands
 
