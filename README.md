@@ -9,7 +9,7 @@ DealBridge helps buyers and sellers turn informal Telegram conversations into cl
 - Create and share product or service deal listings through Telegram.
 - Use AI to draft deal terms from a seller's description and update them as the conversation changes.
 - Flag potential scam signals and answer questions using the deal's known terms.
-- Check delivery proof photos with AI.
+- Check buyer-submitted delivery photos against the agreed product and look for visible defects; unclear results or possible issues require buyer review.
 - Authorize, capture, or void payments through PayPal, with a mock checkout path for local demos.
 - Store deal records and history in Elasticsearch.
 

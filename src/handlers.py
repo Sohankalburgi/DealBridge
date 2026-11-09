@@ -1072,7 +1072,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     status_msg = await update.message.reply_text(
-        "🔍 **AI Vision Agent is checking your received-order photo and the seller's code...**",
+        "🔍 **AI is checking the seller's code, product match, and visible condition in your delivery photo. Send a clear photo of the actual received item, not a listing image.**",
         parse_mode='Markdown'
     )
 
@@ -1098,7 +1098,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await status_msg.edit_text(
             f"❌ **Proof Rejected — Funds Remain Held**\n\n"
             f"**Reason:** {verdict['reason']}\n\n"
-            "Ask the seller to send the code in the deal chat if you don't have it, then upload a clear photo of the received item with the code visible.",
+            "Ask the seller to send the code in the deal chat if you don't have it, then send a clear photo of the actual received item with the code visible.",
             parse_mode='Markdown'
         )
 
@@ -1108,7 +1108,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await status_msg.edit_text(
             f"⚠️ **Proof Submitted for Buyer Review**\n\n"
             f"**AI Notes:** {verdict['reason']}\n"
-            f"The agent could not verify it automatically. Confirm receipt to release payment, or report a problem.",
+            f"The agent checks the product against the agreed terms and looks for visible damage or other issues. It could not verify everything automatically. Confirm receipt to release payment, or report a problem.",
             parse_mode='Markdown'
         )
 
@@ -1122,6 +1122,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             caption=(
                 f"📦 **Your Received-Order Photo Needs Review**\n\n"
                 f"**AI Verification:** {verdict['reason']}\n"
+                f"**Product condition:** {verdict['product_condition']}\n"
                 f"**Tracking:** `{verdict['tracking']}`\n\n"
                 f"If you received the item as agreed, approve releasing the held funds to the seller. Otherwise, report a problem."
             ),
@@ -1157,6 +1158,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             await status_msg.edit_text(
                 f"✅ **Received-Order Photo Verified & Payment Released!**\n\n"
                 f"**AI Verdict:** {verdict['reason']}\n"
+                f"**Product condition:** {verdict['product_condition']}\n"
                 f"**PayPal Capture ID:** `{capture_id}`\n\n"
                 f"The held funds have been released to the seller.",
                 parse_mode='Markdown'
@@ -1185,6 +1187,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
                 caption=(
                     f"✅ **Received-Order Photo Verified — Deal Completed!**\n\n"
                     f"**AI Verdict:** {verdict['reason']}\n"
+                    f"**Product condition:** {verdict['product_condition']}\n"
                     f"**Tracking:** `{verdict['tracking']}`\n"
                     f"**PayPal Capture ID:** `{capture_id}`\n\n"
                     f"The payment hold has been released to the seller."
@@ -1212,7 +1215,7 @@ async def complete_payment_hold_notifications(context: ContextTypes.DEFAULT_TYPE
     await context.bot.send_message(
         chat_id=deal['buyer_id'],
         text=f"✅ **Payment Hold Secured!** (Auth ID: `{auth_id}`)\n"
-             f"Your funds are safely held in escrow. After the order arrives, upload a clear photo of the received item with the code from the seller visible. The agent will verify it before releasing payment.",
+             f"Your funds are safely held in escrow. After the order arrives, send a clear photo of the actual item you received (not a listing or stock image) with the code from the seller visible. The agent checks that it matches the deal and looks for visible damage or other issues before releasing payment. Unclear photos or possible issues go to buyer review.",
         parse_mode='Markdown'
     )
 
@@ -1220,7 +1223,7 @@ async def complete_payment_hold_notifications(context: ContextTypes.DEFAULT_TYPE
         chat_id=deal['seller_id'],
         text=f"✅ **Funds Secured in Escrow!** (Auth ID: `{auth_id}`)\n"
              f"The buyer has authorized the payment hold. It is now safe to fulfill the agreed terms.\n\n"
-             f"📨 **Action Required — Send this one-time code to the buyer in the deal chat.** After the order arrives, the buyer must upload a photo with the code visible. The agent will verify the photo before releasing payment.\n\n"
+             f"📨 **Action Required — Send this one-time code to the buyer in the deal chat.** After the order arrives, the buyer must send a clear photo of the actual received item with the code visible. The agent checks the product against the deal terms and looks for visible defects before releasing payment; possible issues require buyer review.\n\n"
              f"👉 **`{deal['proof_code']}`** 👈\n\n"
              f"Do not upload the proof photo yourself; the buyer submits it after receiving the order.",
         parse_mode='Markdown'
